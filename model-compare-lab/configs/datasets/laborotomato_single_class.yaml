@@ -1,0 +1,6 @@
+path: ../../data/processed/laborotomato_single_class
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: tomato

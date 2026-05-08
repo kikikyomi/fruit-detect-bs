@@ -1,0 +1,14 @@
+model: rtdetr-l.pt
+data: configs/datasets/tomatod_single_class.yaml
+epochs: 150
+imgsz: 960
+batch: 8
+device: 0
+workers: 8
+patience: 30
+project: artifacts/train
+name: rtdetr_l_tomatod_single
+optimizer: auto
+seed: 42
+conf: 0.25
+iou: 0.5

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local configuration
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+fruit-veg-detect/backend/app/data/outputs/
+fruit-veg-detect/backend/app/data/uploads/
+fruit-veg-detect/backend/app/data/records.sqlite3
+
+# Presentation generated artifacts
+presentation/_defense_preview/
+presentation/_docx_media/
+presentation/_exported_slides*/
+presentation/_ppt_media/
+presentation/~$*.pptx
+
+# Logs
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,14 @@
+model: yolo11m.pt
+data: configs/datasets/tomatod_single_class.yaml
+epochs: 200
+imgsz: 960
+batch: 16
+device: 0
+workers: 8
+patience: 40
+project: artifacts/train
+name: yolo11m_tomatod_single
+optimizer: auto
+seed: 42
+conf: 0.25
+iou: 0.5
