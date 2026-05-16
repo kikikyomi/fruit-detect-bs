@@ -31,6 +31,12 @@ def _should_use_gpu_embedder(device: str) -> bool:
     normalized = (device or "cpu").strip().lower()
     if normalized in {"", "cpu"}:
         return False
+    if normalized == "auto":
+        try:
+            import torch
+        except Exception:
+            return False
+        return bool(torch.cuda.is_available())
     if normalized in {"gpu", "cuda"}:
         normalized = "cuda:0"
 
@@ -135,7 +141,21 @@ class _CameraSession:
     frame_index: int
     last_seen: datetime
     tracker_backend: str
+    max_age: int
+    n_init: int
     max_time_since_update: int
+    max_cosine_distance: float
+    nn_budget: int
+
+
+@dataclass(frozen=True)
+class _CameraTrackerConfig:
+    tracker_backend: str
+    max_age: int
+    n_init: int
+    max_time_since_update: int
+    max_cosine_distance: float
+    nn_budget: int
 
 
 def _normalize_backend_mode(raw: str | None) -> str:
@@ -150,16 +170,32 @@ class VideoTracker:
         self,
         backend_override: str | None = None,
         n_init_override: int | None = None,
+        max_age_override: int | None = None,
         max_time_since_update_override: int | None = None,
+        max_cosine_distance_override: float | None = None,
+        nn_budget_override: int | None = None,
+        device_override: str | None = None,
     ) -> None:
         self.tracker_name = "naive-iou"
         self.deepsort_enabled = False
         self._deep_sort: Any | None = None
         self.backend_mode = _normalize_backend_mode(backend_override or settings.TRACKER_BACKEND)
+        self.device = device_override or settings.DEVICE
+        self.max_age = max(
+            1,
+            int(max_age_override if max_age_override is not None else settings.TRACKER_MAX_AGE),
+        )
         self.n_init = max(
             1,
             int(n_init_override if n_init_override is not None else settings.TRACKER_N_INIT),
         )
+        self.max_cosine_distance = float(
+            max_cosine_distance_override
+            if max_cosine_distance_override is not None
+            else settings.TRACKER_MAX_COSINE_DISTANCE
+        )
+        nn_budget = int(nn_budget_override if nn_budget_override is not None else settings.TRACKER_NN_BUDGET)
+        self.nn_budget: int | None = nn_budget if nn_budget > 0 else None
         self.max_time_since_update = max(
             1,
             int(
@@ -169,7 +205,7 @@ class VideoTracker:
             ),
         )
 
-        enable_deepsort = _should_enable_deepsort(self.backend_mode, settings.DEVICE)
+        enable_deepsort = _should_enable_deepsort(self.backend_mode, self.device)
 
         if DeepSort is None:
             logger.warning(
@@ -182,19 +218,21 @@ class VideoTracker:
                 "Tracker backend is set to %s under device %s. "
                 "Using naive IoU tracker for lower latency.",
                 self.backend_mode,
-                settings.DEVICE,
+                self.device,
             )
         else:
             try:
                 self._deep_sort = DeepSort(
-                    max_age=max(settings.TRACKER_MAX_AGE, self.max_time_since_update + 2),
+                    max_age=max(self.max_age, self.max_time_since_update + 2),
                     n_init=self.n_init,
                     max_iou_distance=settings.TRACKER_MAX_IOU_DISTANCE,
+                    max_cosine_distance=self.max_cosine_distance,
+                    nn_budget=self.nn_budget,
                     nms_max_overlap=1.0,
                     embedder="mobilenet",
                     half=True,
                     bgr=True,
-                    embedder_gpu=_should_use_gpu_embedder(settings.DEVICE),
+                    embedder_gpu=_should_use_gpu_embedder(self.device),
                 )
                 self.tracker_name = "deepsort"
                 self.deepsort_enabled = True
@@ -518,28 +556,54 @@ class CameraTrackerManager:
 
     def _build_tracker(
         self,
-        tracker_backend: str | None,
-        max_time_since_update_override: int | None,
+        config: _CameraTrackerConfig,
     ) -> VideoTracker:
         return VideoTracker(
-            backend_override=tracker_backend,
-            max_time_since_update_override=max_time_since_update_override,
+            backend_override=config.tracker_backend,
+            n_init_override=config.n_init,
+            max_age_override=config.max_age,
+            max_time_since_update_override=config.max_time_since_update,
+            max_cosine_distance_override=config.max_cosine_distance,
+            nn_budget_override=config.nn_budget,
+            device_override=settings.CAMERA_DEVICE,
         )
 
     def _resolve_tracker_config(
         self,
         tracker_backend: str | None,
         max_time_since_update_override: int | None,
-    ) -> tuple[str, int]:
-        return (
-            _normalize_backend_mode(tracker_backend or settings.TRACKER_BACKEND),
-            max(
+        max_age_override: int | None = None,
+        n_init_override: int | None = None,
+        max_cosine_distance_override: float | None = None,
+        nn_budget_override: int | None = None,
+    ) -> _CameraTrackerConfig:
+        max_age = max(
+            1,
+            int(max_age_override if max_age_override is not None else settings.CAMERA_TRACKER_MAX_AGE),
+        )
+        return _CameraTrackerConfig(
+            tracker_backend=_normalize_backend_mode(tracker_backend or settings.TRACKER_BACKEND),
+            max_age=max_age,
+            n_init=max(
+                1,
+                int(n_init_override if n_init_override is not None else settings.CAMERA_TRACKER_N_INIT),
+            ),
+            max_time_since_update=max(
                 1,
                 int(
                     max_time_since_update_override
                     if max_time_since_update_override is not None
-                    else settings.TRACKER_MAX_TIME_SINCE_UPDATE
+                    else max_age
                 ),
+            ),
+            max_cosine_distance=float(
+                max_cosine_distance_override
+                if max_cosine_distance_override is not None
+                else settings.CAMERA_TRACKER_MAX_COSINE_DISTANCE
+            ),
+            nn_budget=max(
+                0,
+                int(nn_budget_override if nn_budget_override is not None else settings.CAMERA_TRACKER_NN_BUDGET),
             ),
         )
 
@@ -549,13 +613,17 @@ class CameraTrackerManager:
             self._cleanup_locked(now)
             sid = session_id or uuid.uuid4().hex
             if sid not in self._sessions:
-                tracker_backend, max_time_since_update = self._resolve_tracker_config(None, None)
+                config = self._resolve_tracker_config(None, None)
                 self._sessions[sid] = _CameraSession(
-                    tracker=self._build_tracker(tracker_backend, max_time_since_update),
+                    tracker=self._build_tracker(config),
                     frame_index=0,
                     last_seen=now,
-                    tracker_backend=tracker_backend,
-                    max_time_since_update=max_time_since_update,
+                    tracker_backend=config.tracker_backend,
+                    max_age=config.max_age,
+                    n_init=config.n_init,
+                    max_time_since_update=config.max_time_since_update,
+                    max_cosine_distance=config.max_cosine_distance,
+                    nn_budget=config.nn_budget,
                 )
             return sid
 
@@ -570,35 +638,55 @@ class CameraTrackerManager:
         frame_bgr: np.ndarray,
         tracker_backend: str | None = None,
         max_time_since_update_override: int | None = None,
+        max_age_override: int | None = None,
+        n_init_override: int | None = None,
+        max_cosine_distance_override: float | None = None,
+        nn_budget_override: int | None = None,
     ) -> dict[str, Any]:
         now = datetime.now()
         with self._lock:
             self._cleanup_locked(now)
             sid = session_id or uuid.uuid4().hex
             session = self._sessions.get(sid)
-            requested_backend, requested_max_time_since_update = self._resolve_tracker_config(
+            requested_config = self._resolve_tracker_config(
                 tracker_backend,
                 max_time_since_update_override,
+                max_age_override=max_age_override,
+                n_init_override=n_init_override,
+                max_cosine_distance_override=max_cosine_distance_override,
+                nn_budget_override=nn_budget_override,
             )
             if session is None:
                 session = _CameraSession(
-                    tracker=self._build_tracker(requested_backend, requested_max_time_since_update),
+                    tracker=self._build_tracker(requested_config),
                     frame_index=0,
                     last_seen=now,
-                    tracker_backend=requested_backend,
-                    max_time_since_update=requested_max_time_since_update,
+                    tracker_backend=requested_config.tracker_backend,
+                    max_age=requested_config.max_age,
+                    n_init=requested_config.n_init,
+                    max_time_since_update=requested_config.max_time_since_update,
+                    max_cosine_distance=requested_config.max_cosine_distance,
+                    nn_budget=requested_config.nn_budget,
                 )
                 self._sessions[sid] = session
             elif (
-                session.tracker_backend != requested_backend
-                or session.max_time_since_update != requested_max_time_since_update
+                session.tracker_backend != requested_config.tracker_backend
+                or session.max_age != requested_config.max_age
+                or session.n_init != requested_config.n_init
+                or session.max_time_since_update != requested_config.max_time_since_update
+                or session.max_cosine_distance != requested_config.max_cosine_distance
+                or session.nn_budget != requested_config.nn_budget
             ):
                 session = _CameraSession(
-                    tracker=self._build_tracker(requested_backend, requested_max_time_since_update),
+                    tracker=self._build_tracker(requested_config),
                     frame_index=0,
                     last_seen=now,
-                    tracker_backend=requested_backend,
-                    max_time_since_update=requested_max_time_since_update,
+                    tracker_backend=requested_config.tracker_backend,
+                    max_age=requested_config.max_age,
+                    n_init=requested_config.n_init,
+                    max_time_since_update=requested_config.max_time_since_update,
+                    max_cosine_distance=requested_config.max_cosine_distance,
+                    nn_budget=requested_config.nn_budget,
                 )
                 self._sessions[sid] = session
 
@@ -615,6 +703,13 @@ class CameraTrackerManager:
                 "track_summaries": session.tracker.get_track_summaries(),
                 "tracker": session.tracker.tracker_name,
                 "deepsort_enabled": session.tracker.deepsort_enabled,
+                "tracker_config": {
+                    "max_age": session.max_age,
+                    "n_init": session.n_init,
+                    "max_time_since_update": session.max_time_since_update,
+                    "max_cosine_distance": session.max_cosine_distance,
+                    "nn_budget": session.nn_budget,
+                },
             }
 
     def session_count(self) -> int:

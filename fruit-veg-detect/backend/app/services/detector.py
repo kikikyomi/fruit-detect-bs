@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,15 @@ class DetectorService:
         self.load_error: str | None = None
 
     def _resolve_runtime_device(self, requested_device: str) -> str:
-        device = (requested_device or "cpu").strip() or "cpu"
+        device = (requested_device or "auto").strip() or "auto"
         normalized = device.lower()
+
+        if normalized == "auto":
+            try:
+                import torch
+            except Exception:
+                return "cpu"
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
 
         if normalized in {"gpu", "cuda"}:
             device = "cuda:0"
@@ -190,6 +198,9 @@ class DetectorService:
         conf: float | None = None,
         iou: float | None = None,
         model_key: str | None = None,
+        imgsz: int | None = None,
+        device: str | None = None,
+        half: bool | None = None,
     ) -> dict[str, Any]:
         h, w = image_bgr.shape[:2]
         normalized_model_key, model = self._get_model(model_key)
@@ -198,22 +209,33 @@ class DetectorService:
             conf = settings.CONF_THRES
         if iou is None:
             iou = settings.IOU_THRES
+        runtime_device = self._resolve_runtime_device(device if device is not None else self.requested_device)
+        use_half = bool(half) and runtime_device != "cpu"
 
         if model is None:
             return {
                 "boxes": [],
                 "image_size": {"w": w, "h": h},
                 "model_key": normalized_model_key,
+                "device": runtime_device,
+                "timings": {"yolo_ms": 0.0},
             }
 
         try:
-            results = model.predict(
-                source=image_bgr,
-                conf=conf,
-                iou=iou,
-                device=self.runtime_device,
-                verbose=False,
-            )
+            predict_kwargs: dict[str, Any] = {
+                "source": image_bgr,
+                "conf": conf,
+                "iou": iou,
+                "device": runtime_device,
+                "half": use_half,
+                "verbose": False,
+            }
+            if imgsz is not None:
+                predict_kwargs["imgsz"] = int(imgsz)
+
+            started_at = time.perf_counter()
+            results = model.predict(**predict_kwargs)
+            yolo_ms = (time.perf_counter() - started_at) * 1000.0
             first = results[0]
             parsed_boxes: list[dict[str, Any]] = []
 
@@ -242,6 +264,10 @@ class DetectorService:
                 "boxes": parsed_boxes,
                 "image_size": {"w": w, "h": h},
                 "model_key": normalized_model_key,
+                "device": runtime_device,
+                "imgsz": int(imgsz) if imgsz is not None else None,
+                "half": use_half,
+                "timings": {"yolo_ms": round(yolo_ms, 3)},
             }
         except Exception as exc:
             logger.exception("Inference failed: %s", exc)
@@ -249,6 +275,10 @@ class DetectorService:
                 "boxes": [],
                 "image_size": {"w": w, "h": h},
                 "model_key": normalized_model_key,
+                "device": runtime_device,
+                "imgsz": int(imgsz) if imgsz is not None else None,
+                "half": use_half,
+                "timings": {"yolo_ms": 0.0},
                 "error": str(exc),
             }
 

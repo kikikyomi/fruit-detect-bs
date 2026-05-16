@@ -26,7 +26,7 @@
         </div>
         <div class="param-row">
           <span>断轨容忍帧数: {{ trackerMaxTimeSinceUpdate }}</span>
-          <el-slider v-model="trackerMaxTimeSinceUpdate" :min="3" :max="20" :step="1" />
+          <el-slider v-model="trackerMaxTimeSinceUpdate" :min="3" :max="30" :step="1" />
         </div>
         <div class="hint">
           GPU 环境建议先试“DeepSORT + 60ms + 容忍帧数 10”。如果 ID 还是跳，再把容忍帧数调到 12 或 14。
@@ -95,11 +95,12 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const overlayRef = ref<HTMLCanvasElement | null>(null)
 
 const running = ref(false)
-const conf = ref(0.45)
+const conf = ref(0.35)
 const iou = ref(0.45)
+const imgsz = ref(416)
 const captureIntervalMs = ref(120)
-const trackerBackend = ref<'auto' | 'deepsort' | 'naive'>('naive')
-const trackerMaxTimeSinceUpdate = ref(6)
+const trackerBackend = ref<'auto' | 'deepsort' | 'naive'>('auto')
+const trackerMaxTimeSinceUpdate = ref(15)
 const modelKey = ref<ModelKey>('fruit')
 const realtimeFps = ref(0)
 const boxes = ref<DetectBox[]>([])
@@ -124,27 +125,27 @@ let transitionTo = new Map<string, DetectBox>()
 let transitionStartedAt = 0
 let transitionDurationMs = 160
 
-const CAPTURE_MAX_WIDTH = 384
-const CAPTURE_JPEG_QUALITY = 0.72
+const CAPTURE_MAX_WIDTH = 640
+const CAPTURE_JPEG_QUALITY = 0.75
 
 const applyCameraPreset = (preset: 'stable' | 'balanced' | 'speed') => {
   if (preset === 'stable') {
     trackerBackend.value = 'auto'
     captureIntervalMs.value = 120
-    trackerMaxTimeSinceUpdate.value = 8
+    trackerMaxTimeSinceUpdate.value = 15
     return
   }
 
   if (preset === 'speed') {
     trackerBackend.value = 'naive'
     captureIntervalMs.value = 160
-    trackerMaxTimeSinceUpdate.value = 5
+    trackerMaxTimeSinceUpdate.value = 10
     return
   }
 
   trackerBackend.value = 'naive'
   captureIntervalMs.value = 120
-  trackerMaxTimeSinceUpdate.value = 6
+  trackerMaxTimeSinceUpdate.value = 12
 }
 
 const cloneBox = (box: DetectBox): DetectBox => ({ ...box })
@@ -391,6 +392,7 @@ const tickDetect = async () => {
       trackerBackend.value,
       trackerMaxTimeSinceUpdate.value,
       modelKey.value,
+      imgsz.value,
     )
     sessionId.value = data.session_id
     boxes.value = (data.result.boxes || []).map(cloneBox)
@@ -448,8 +450,8 @@ const startCamera = async () => {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         width: { ideal: 640 },
-        height: { ideal: 360 },
-        frameRate: { ideal: 15, max: 20 },
+        height: { ideal: 480 },
+        frameRate: { ideal: 20, max: 24 },
         facingMode: 'environment',
       },
       audio: false,

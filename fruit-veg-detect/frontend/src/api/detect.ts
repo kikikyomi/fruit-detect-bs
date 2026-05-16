@@ -20,6 +20,9 @@ export interface ImageDetectResult {
     h: number
   }
   model_key?: ModelKey
+  imgsz?: number
+  device?: string
+  half?: boolean
 }
 
 export interface ImageDetectResponse {
@@ -66,7 +69,7 @@ export interface VideoDetectResponse {
     }>
   }
   tracking: {
-    track_summaries: Array<{
+  track_summaries: Array<{
       track_id: number
       cls_name: string
       cls_id: number
@@ -95,6 +98,12 @@ export interface CameraFrameResponse {
     }>
     tracker: string
     deepsort_enabled: boolean
+    tracker_config?: Record<string, number>
+  }
+  performance?: {
+    total_ms: number
+    yolo_ms: number
+    deepsort_ms: number
   }
   saved?: boolean
 }
@@ -165,6 +174,7 @@ export const cameraFrameDetect = async (
   trackerBackend?: string,
   trackerMaxTimeSinceUpdate?: number,
   modelKey: ModelKey = 'fruit',
+  imgsz?: number,
 ): Promise<CameraFrameResponse> => {
   const form = new FormData()
   form.append('file', file)
@@ -179,6 +189,9 @@ export const cameraFrameDetect = async (
   }
   if (typeof trackerMaxTimeSinceUpdate === 'number') {
     form.append('tracker_max_time_since_update', String(trackerMaxTimeSinceUpdate))
+  }
+  if (typeof imgsz === 'number') {
+    form.append('imgsz', String(imgsz))
   }
 
   const { data } = await client.post<CameraFrameResponse>('/api/detect/camera/frame', form)

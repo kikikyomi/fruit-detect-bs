@@ -21,10 +21,16 @@ def _parse_csv_env(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _parse_bool_env(raw: str | None, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalize_requested_device(raw: str | None) -> str:
-    value = (raw or "cpu").strip()
+    value = (raw or "auto").strip()
     if not value:
-        return "cpu"
+        return "auto"
 
     normalized = value.lower()
     if normalized in {"gpu", "cuda"}:
@@ -72,18 +78,15 @@ class Settings:
         self.IOU_THRES = float(os.getenv("IOU_THRES", "0.45"))
         self.DETECTION_CLASS_ALLOWLIST = _parse_csv_env(os.getenv("DETECTION_CLASS_ALLOWLIST"))
         self.DEVICE = _normalize_requested_device(os.getenv("DEVICE", "cpu"))
-        self.SAVE_EMPTY_RESULTS = os.getenv("SAVE_EMPTY_RESULTS", "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        self.SAVE_EMPTY_RESULTS = _parse_bool_env(os.getenv("SAVE_EMPTY_RESULTS"), default=False)
         self.RECORD_RETENTION_LIMIT = int(os.getenv("RECORD_RETENTION_LIMIT", "50"))
         self.VIDEO_SAMPLE_INTERVAL = int(os.getenv("VIDEO_SAMPLE_INTERVAL", "10"))
         self.TRACKER_BACKEND = os.getenv("TRACKER_BACKEND", "auto").strip().lower() or "auto"
         self.TRACKER_MAX_AGE = int(os.getenv("TRACKER_MAX_AGE", "30"))
         self.TRACKER_N_INIT = int(os.getenv("TRACKER_N_INIT", "2"))
         self.TRACKER_MAX_IOU_DISTANCE = float(os.getenv("TRACKER_MAX_IOU_DISTANCE", "0.7"))
+        self.TRACKER_MAX_COSINE_DISTANCE = float(os.getenv("TRACKER_MAX_COSINE_DISTANCE", "0.3"))
+        self.TRACKER_NN_BUDGET = int(os.getenv("TRACKER_NN_BUDGET", "50"))
         self.TRACKER_MAX_TIME_SINCE_UPDATE = int(os.getenv("TRACKER_MAX_TIME_SINCE_UPDATE", "5"))
         self.TRACKER_TRAJECTORY_LEN = int(os.getenv("TRACKER_TRAJECTORY_LEN", "64"))
         self.TRACKER_RENDER_STALE_FRAMES = int(os.getenv("TRACKER_RENDER_STALE_FRAMES", "12"))
@@ -98,6 +101,19 @@ class Settings:
             os.getenv("TRACKER_FALLBACK_CENTER_DISTANCE_WEIGHT", "0.35")
         )
         self.CAMERA_TRACKER_SESSION_TTL_SEC = int(os.getenv("CAMERA_TRACKER_SESSION_TTL_SEC", "120"))
+        self.CAMERA_IMGSZ = int(os.getenv("CAMERA_IMGSZ", "416"))
+        self.CAMERA_CONF_THRES = float(os.getenv("CAMERA_CONF_THRES", "0.35"))
+        self.CAMERA_IOU_THRES = float(os.getenv("CAMERA_IOU_THRES", "0.45"))
+        self.CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "640"))
+        self.CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "480"))
+        self.CAMERA_FRAME_SKIP = int(os.getenv("CAMERA_FRAME_SKIP", "2"))
+        self.CAMERA_DEVICE = _normalize_requested_device(os.getenv("CAMERA_DEVICE", "auto"))
+        self.CAMERA_HALF = os.getenv("CAMERA_HALF", "auto").strip().lower()
+        self.CAMERA_JPEG_QUALITY = int(os.getenv("CAMERA_JPEG_QUALITY", "75"))
+        self.CAMERA_TRACKER_MAX_AGE = int(os.getenv("CAMERA_TRACKER_MAX_AGE", "15"))
+        self.CAMERA_TRACKER_N_INIT = int(os.getenv("CAMERA_TRACKER_N_INIT", "2"))
+        self.CAMERA_TRACKER_MAX_COSINE_DISTANCE = float(os.getenv("CAMERA_TRACKER_MAX_COSINE_DISTANCE", "0.3"))
+        self.CAMERA_TRACKER_NN_BUDGET = int(os.getenv("CAMERA_TRACKER_NN_BUDGET", "50"))
 
         self.CORS_ORIGINS = _parse_csv_env(os.getenv("CORS_ORIGINS")) or [
             "http://localhost:5173",

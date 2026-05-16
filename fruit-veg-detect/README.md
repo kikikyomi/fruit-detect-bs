@@ -37,6 +37,10 @@ fruit-veg-detect/
         records.sqlite3
     requirements.txt
     README.md
+  scripts/
+    inference.py
+    track_deepsort.py
+    benchmark_camera.py
   frontend/
     src/
       main.ts
@@ -164,12 +168,29 @@ uvicorn app.main:app --reload
 
 ## 六、摄像头方案说明
 
-已实现方案 A：前端 `getUserMedia` 拉流，每 300ms 截帧调用 `/api/detect/camera/frame`，通过会话化跟踪接口返回检测框、`track_id` 和轨迹，前端 canvas 叠加显示。
+已实现方案 A：前端 `getUserMedia` 拉流，默认请求 640×480 画面并以 JPEG quality 0.75 截帧调用 `/api/detect/camera/frame`。摄像头接口默认使用 `imgsz=416`、`conf=0.35`，并通过会话化跟踪接口返回检测框、`track_id` 和轨迹，前端 canvas 叠加显示。
 
 - 支持开始/停止
 - 内置单请求在途保护（避免请求堆积）
+- 摄像头实时模式默认不保存图片、视频、CSV 或数据库记录
 
-## 七、后续替换真实推理
+## 七、摄像头性能测试脚本
+
+从项目根目录运行：
+
+```bash
+python scripts/inference.py --weights best.pt --source 0 --imgsz 416 --conf 0.35 --device 0 --half --camera-width 640 --camera-height 480
+python scripts/track_deepsort.py --weights best.pt --source 0 --imgsz 416 --conf 0.35 --device 0 --half --camera-width 640 --camera-height 480 --frame-skip 2 --max-age 15 --n-init 2
+python scripts/track_deepsort.py --weights best.pt --source 0 --imgsz 416 --conf 0.35 --device 0 --half --disable-deepsort
+python scripts/benchmark_camera.py --weights best.pt --source 0 --imgsz 416 --frame-skip 2 --device 0 --half
+```
+
+`benchmark_camera.py` 会输出平均 FPS、YOLO/DeepSORT/绘制平均耗时、总帧数、有效检测帧数和 CPU/GPU 设备信息，并保存到：
+
+- `runs/benchmark_camera/result.txt`
+- `runs/benchmark_camera/result.csv`
+
+## 八、后续替换真实推理
 
 当前 `backend/app/services/detector.py` 已与 API 层解耦。你后续可：
 
