@@ -28,7 +28,43 @@ pnpm-debug.log*
 # Runtime data
 fruit-veg-detect/backend/app/data/outputs/
 fruit-veg-detect/backend/app/data/uploads/
+fruit-veg-detect/backend/app/data/cache/
+fruit-veg-detect/backend/app/data/temp/
+fruit-veg-detect/backend/app/data/tmp/
 fruit-veg-detect/backend/app/data/records.sqlite3
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Training datasets / outputs
+datasets/
+runs/
+weights/
+model-compare-lab/data/
+model-compare-lab/datasets/
+model-compare-lab/outputs/
+model-compare-lab/runs/
+model-compare-lab/weights/
+rollback-backup-*/
+
+# Large media / model artifacts
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.pt
+*.pth
+*.onnx
+!fruit-veg-detect/backend/app/data/model/fruit/best.pt
+!fruit-veg-detect/backend/app/data/model/vegetable/best.pt
 
 # Presentation generated artifacts
 presentation/_defense_preview/
