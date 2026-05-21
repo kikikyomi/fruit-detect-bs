@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +202,7 @@ class DetectorService:
         imgsz: int | None = None,
         device: str | None = None,
         half: bool | None = None,
+        classes: list[int] | None = None,
     ) -> dict[str, Any]:
         h, w = image_bgr.shape[:2]
         normalized_model_key, model = self._get_model(model_key)
@@ -232,9 +234,19 @@ class DetectorService:
             }
             if imgsz is not None:
                 predict_kwargs["imgsz"] = int(imgsz)
+            if classes:
+                predict_kwargs["classes"] = classes
+
+            try:
+                import torch
+            except Exception:
+                inference_context = nullcontext()
+            else:
+                inference_context = torch.inference_mode()
 
             started_at = time.perf_counter()
-            results = model.predict(**predict_kwargs)
+            with inference_context:
+                results = model.predict(**predict_kwargs)
             yolo_ms = (time.perf_counter() - started_at) * 1000.0
             first = results[0]
             parsed_boxes: list[dict[str, Any]] = []
@@ -295,7 +307,7 @@ class DetectorService:
         self,
         image_bgr: np.ndarray,
         boxes: list[dict[str, Any]],
-        trajectories: dict[int, list[tuple[int, int]]] | None = None,
+        trajectories: dict[int, list[tuple[int, int] | None]] | None = None,
     ) -> np.ndarray:
         output = image_bgr.copy()
         image_h, image_w = output.shape[:2]
@@ -305,17 +317,32 @@ class DetectorService:
 
         if trajectories:
             for track_id, points in trajectories.items():
-                if len(points) < 2:
-                    continue
-                polyline = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
-                cv2.polylines(
-                    output,
-                    [polyline],
-                    False,
-                    self._color_for_track(track_id),
-                    box_thickness,
-                    cv2.LINE_AA,
-                )
+                segment: list[tuple[int, int]] = []
+                for point in points:
+                    if point is None:
+                        if len(segment) >= 2:
+                            polyline = np.array(segment, dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(
+                                output,
+                                [polyline],
+                                False,
+                                self._color_for_track(track_id),
+                                box_thickness,
+                                cv2.LINE_AA,
+                            )
+                        segment = []
+                        continue
+                    segment.append(point)
+                if len(segment) >= 2:
+                    polyline = np.array(segment, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(
+                        output,
+                        [polyline],
+                        False,
+                        self._color_for_track(track_id),
+                        box_thickness,
+                        cv2.LINE_AA,
+                    )
 
         for box in boxes:
             x1 = int(box["x1"])

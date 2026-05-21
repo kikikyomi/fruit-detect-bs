@@ -24,19 +24,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark realtime camera FPS")
     parser.add_argument("--weights", default="best.pt", help="Model weights, e.g. best.pt")
     parser.add_argument("--source", default="0", help="Camera index or video path")
-    parser.add_argument("--imgsz", type=int, default=416)
-    parser.add_argument("--conf", type=float, default=0.35)
+    parser.add_argument("--imgsz", type=int, default=480)
+    parser.add_argument("--conf", type=float, default=0.15)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--device", default="auto", help="auto, cpu, 0, cuda:0")
     parser.add_argument("--half", dest="half", action="store_true", default=None)
     parser.add_argument("--no-half", dest="half", action="store_false")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
-    parser.add_argument("--frame-skip", type=int, default=2, help="Run YOLO every N frames")
-    parser.add_argument("--max-age", type=int, default=15)
+    parser.add_argument("--frame-skip", type=int, default=0, help="Frames to skip between YOLO runs; 0 means every frame")
+    parser.add_argument("--max-age", type=int, default=80)
     parser.add_argument("--n-init", type=int, default=2)
-    parser.add_argument("--max-cosine-distance", type=float, default=0.3)
-    parser.add_argument("--nn-budget", type=int, default=50)
+    parser.add_argument("--max-iou-distance", type=float, default=0.8)
+    parser.add_argument("--max-cosine-distance", type=float, default=0.5)
+    parser.add_argument("--nn-budget", type=int, default=150)
+    parser.add_argument("--smooth-alpha", type=float, default=0.65)
+    parser.add_argument("--max-center-jump", type=float, default=220.0)
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--disable-deepsort", action="store_true")
     parser.add_argument("--max-frames", type=int, default=300)
     parser.add_argument("--duration", type=float, default=0.0, help="Optional benchmark duration in seconds")
@@ -60,7 +64,7 @@ def write_results(run_dir: Path, summary: dict[str, str | int | float]) -> None:
 
 def main() -> None:
     args = parse_args()
-    args.frame_skip = max(1, int(args.frame_skip))
+    args.frame_skip = max(0, int(args.frame_skip))
     args.device, device_is_cuda, device_label = resolve_device(args.device)
     args.half = resolve_half(args.half, device_is_cuda)
 
@@ -81,6 +85,7 @@ def main() -> None:
     deepsort_times: list[float] = []
     draw_times: list[float] = []
     last_display_boxes: list[dict] = []
+    detection_interval = max(1, int(args.frame_skip) + 1)
 
     benchmark_started_at = time.perf_counter()
     try:
@@ -94,7 +99,7 @@ def main() -> None:
             if not ok:
                 break
 
-            detection_frame = total_frames % args.frame_skip == 0
+            detection_frame = total_frames % detection_interval == 0
             detections: list[dict] = []
             if detection_frame:
                 detections, yolo_ms = predict_boxes(

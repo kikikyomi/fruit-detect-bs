@@ -45,11 +45,21 @@ def camera_status() -> dict[str, object]:
             "camera_width": settings.CAMERA_WIDTH,
             "camera_height": settings.CAMERA_HEIGHT,
             "frame_skip": settings.CAMERA_FRAME_SKIP,
+            "show_fps": settings.CAMERA_SHOW_FPS,
+            "debug": settings.CAMERA_DEBUG,
+            "save_every_frame": settings.CAMERA_SAVE_EVERY_FRAME,
+            "use_deepsort": settings.CAMERA_USE_DEEPSORT,
             "jpeg_quality": settings.CAMERA_JPEG_QUALITY,
+            "tracker_backend": settings.TRACKER_BACKEND,
             "max_age": settings.CAMERA_TRACKER_MAX_AGE,
             "n_init": settings.CAMERA_TRACKER_N_INIT,
+            "max_iou_distance": settings.TRACKER_MAX_IOU_DISTANCE,
             "max_cosine_distance": settings.CAMERA_TRACKER_MAX_COSINE_DISTANCE,
             "nn_budget": settings.CAMERA_TRACKER_NN_BUDGET,
+            "trail_length": settings.TRACKER_TRAJECTORY_LEN,
+            "smoothing_enabled": settings.SMOOTHING_ENABLED,
+            "smoothing_alpha": settings.SMOOTHING_ALPHA,
+            "max_center_jump": settings.SMOOTHING_MAX_CENTER_JUMP,
         },
     }
 
@@ -81,8 +91,10 @@ async def detect_camera_frame(
     max_age: int | None = Form(default=None),
     n_init: int | None = Form(default=None),
     max_cosine_distance: float | None = Form(default=None),
+    max_iou_distance: float | None = Form(default=None),
     nn_budget: int | None = Form(default=None),
-    disable_deepsort: bool = Form(default=False),
+    disable_deepsort: bool | None = Form(default=None),
+    debug: bool | None = Form(default=None),
     save: bool = Form(default=False),
     save_video: bool = Form(default=False),
     save_csv: bool = Form(default=False),
@@ -105,6 +117,10 @@ async def detect_camera_frame(
     active_half = _resolve_camera_half(half, active_device)
     active_conf = float(conf if conf is not None else settings.CAMERA_CONF_THRES)
     active_iou = float(iou if iou is not None else settings.CAMERA_IOU_THRES)
+    active_debug = bool(debug if debug is not None else settings.CAMERA_DEBUG)
+    active_disable_deepsort = bool(
+        disable_deepsort if disable_deepsort is not None else not settings.CAMERA_USE_DEEPSORT
+    )
 
     detection_result = detector_service.predict_image(
         image,
@@ -119,9 +135,10 @@ async def detect_camera_frame(
         raise HTTPException(status_code=500, detail=f"Inference failed: {detection_result['error']}")
 
     tracker_started_at = time.perf_counter()
-    if disable_deepsort:
+    if active_disable_deepsort:
         tracking_result = {
             "session_id": session_id or "",
+            "frame_index": 0,
             "boxes": detection_result["boxes"],
             "trajectories": {},
             "track_summaries": [],
@@ -139,13 +156,42 @@ async def detect_camera_frame(
             max_age_override=max_age,
             n_init_override=n_init,
             max_cosine_distance_override=max_cosine_distance,
+            max_iou_distance_override=max_iou_distance,
             nn_budget_override=nn_budget,
+            debug=active_debug,
         )
     deepsort_ms = (time.perf_counter() - tracker_started_at) * 1000.0
     total_ms = (time.perf_counter() - total_started_at) * 1000.0
 
+    frame_index = int(tracking_result.get("frame_index", 0))
+    if active_debug and frame_index % 30 == 0:
+        fps = 1000.0 / max(total_ms, 1e-6)
+        print(f"[Camera Debug] frame={frame_index}, fps={fps:.2f}", flush=True)
+        print(f"[YOLO] detections={len(detection_result['boxes'])}", flush=True)
+        print(f"[DeepSORT] tracks={len(tracking_result['boxes'])}", flush=True)
+        for box in tracking_result["boxes"]:
+            track_id = box.get("track_id")
+            if track_id is None:
+                continue
+            print(
+                "[Track] id={id}, class={cls}, conf={conf:.3f}, time_since_update={tsu}".format(
+                    id=track_id,
+                    cls=box.get("cls_name", "obj"),
+                    conf=float(box.get("conf", 0.0)),
+                    tsu=int(box.get("time_since_update", 0)),
+                ),
+                flush=True,
+            )
+            if "raw_bbox" in box and "smoothed_bbox" in box:
+                print(
+                    f"[Smoothing] track_id={track_id}, raw_bbox={box['raw_bbox']}, "
+                    f"smoothed_bbox={box['smoothed_bbox']}",
+                    flush=True,
+                )
+
     return {
         "session_id": tracking_result["session_id"],
+        "frame_index": frame_index,
         "result": {
             "boxes": tracking_result["boxes"],
             "image_size": detection_result["image_size"],

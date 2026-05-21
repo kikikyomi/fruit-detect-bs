@@ -26,10 +26,10 @@
         </div>
         <div class="param-row">
           <span>断轨容忍帧数: {{ trackerMaxTimeSinceUpdate }}</span>
-          <el-slider v-model="trackerMaxTimeSinceUpdate" :min="3" :max="30" :step="1" />
+          <el-slider v-model="trackerMaxTimeSinceUpdate" :min="3" :max="120" :step="1" />
         </div>
         <div class="hint">
-          GPU 环境建议先试“DeepSORT + 60ms + 容忍帧数 10”。如果 ID 还是跳，再把容忍帧数调到 12 或 14。
+          GPU 环境建议先试“DeepSORT + 60ms + 容忍帧数 80”。误检较多时可把 Confidence 调到 0.20。
         </div>
         <div class="preset-row">
           <span class="preset-label">预设方案</span>
@@ -77,8 +77,9 @@ import { getApiErrorMessage } from '../api/client'
 import { cameraFrameDetect, createCameraSession, resetCameraSession, type DetectBox, type ModelKey } from '../api/detect'
 
 interface TrackPoint {
-  x: number
-  y: number
+  x?: number
+  y?: number
+  break?: boolean
 }
 
 interface TrackSummary {
@@ -95,12 +96,12 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const overlayRef = ref<HTMLCanvasElement | null>(null)
 
 const running = ref(false)
-const conf = ref(0.35)
+const conf = ref(0.15)
 const iou = ref(0.45)
-const imgsz = ref(416)
-const captureIntervalMs = ref(120)
-const trackerBackend = ref<'auto' | 'deepsort' | 'naive'>('auto')
-const trackerMaxTimeSinceUpdate = ref(15)
+const imgsz = ref(480)
+const captureIntervalMs = ref(60)
+const trackerBackend = ref<'auto' | 'deepsort' | 'naive'>('deepsort')
+const trackerMaxTimeSinceUpdate = ref(80)
 const modelKey = ref<ModelKey>('fruit')
 const realtimeFps = ref(0)
 const boxes = ref<DetectBox[]>([])
@@ -130,22 +131,22 @@ const CAPTURE_JPEG_QUALITY = 0.75
 
 const applyCameraPreset = (preset: 'stable' | 'balanced' | 'speed') => {
   if (preset === 'stable') {
-    trackerBackend.value = 'auto'
-    captureIntervalMs.value = 120
-    trackerMaxTimeSinceUpdate.value = 15
+    trackerBackend.value = 'deepsort'
+    captureIntervalMs.value = 60
+    trackerMaxTimeSinceUpdate.value = 80
     return
   }
 
   if (preset === 'speed') {
-    trackerBackend.value = 'naive'
-    captureIntervalMs.value = 160
-    trackerMaxTimeSinceUpdate.value = 10
+    trackerBackend.value = 'deepsort'
+    captureIntervalMs.value = 90
+    trackerMaxTimeSinceUpdate.value = 60
     return
   }
 
-  trackerBackend.value = 'naive'
-  captureIntervalMs.value = 120
-  trackerMaxTimeSinceUpdate.value = 12
+  trackerBackend.value = 'deepsort'
+  captureIntervalMs.value = 75
+  trackerMaxTimeSinceUpdate.value = 80
 }
 
 const cloneBox = (box: DetectBox): DetectBox => ({ ...box })
@@ -254,10 +255,21 @@ const buildTrajectoryPoints = (boxesToDraw: DetectBox[]) => {
   const result = new Map<number, TrackPoint[]>()
   Object.entries(trajectories.value).forEach(([trackIdRaw, points]) => {
     const trackId = Number(trackIdRaw)
-    const merged = points.map((point) => ({ x: point.x, y: point.y }))
+    const merged: TrackPoint[] = points.map((point) => {
+      if (point.break || point.x === undefined || point.y === undefined) {
+        return { break: true }
+      }
+      return { x: point.x, y: point.y }
+    })
     const currentCenter = boxCentersByTrack.get(trackId)
     if (currentCenter) {
-      const lastPoint = merged[merged.length - 1]
+      let lastPoint: TrackPoint | undefined
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        if (!merged[index].break) {
+          lastPoint = merged[index]
+          break
+        }
+      }
       if (!lastPoint || lastPoint.x !== currentCenter.x || lastPoint.y !== currentCenter.y) {
         merged.push(currentCenter)
       }
@@ -288,11 +300,17 @@ const drawOverlay = (boxesToDraw: DetectBox[]) => {
     if (points.length < 2) return
     ctx.strokeStyle = colorForTrack(trackId)
     ctx.beginPath()
+    let hasSegment = false
     points.forEach((point, index) => {
+      if (point.break || point.x === undefined || point.y === undefined) {
+        hasSegment = false
+        return
+      }
       const sx = point.x * scaleX
       const sy = point.y * scaleY
-      if (index === 0) {
+      if (index === 0 || !hasSegment) {
         ctx.moveTo(sx, sy)
+        hasSegment = true
       } else {
         ctx.lineTo(sx, sy)
       }

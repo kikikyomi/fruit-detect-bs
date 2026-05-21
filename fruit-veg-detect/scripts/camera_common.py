@@ -5,6 +5,7 @@ import hashlib
 import platform
 import sys
 import time
+from contextlib import nullcontext
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,17 +124,29 @@ def predict_boxes(
     iou: float,
     device: str,
     half: bool,
+    classes: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
+    predict_kwargs: dict[str, Any] = {
+        "imgsz": int(imgsz),
+        "conf": float(conf),
+        "iou": float(iou),
+        "device": device,
+        "half": bool(half),
+        "verbose": False,
+    }
+    if classes:
+        predict_kwargs["classes"] = classes
+
+    try:
+        import torch
+    except Exception:
+        inference_context = nullcontext()
+    else:
+        inference_context = torch.inference_mode()
+
     started_at = time.perf_counter()
-    results = model.predict(
-        frame_bgr,
-        imgsz=int(imgsz),
-        conf=float(conf),
-        iou=float(iou),
-        device=device,
-        half=bool(half),
-        verbose=False,
-    )
+    with inference_context:
+        results = model.predict(frame_bgr, **predict_kwargs)
     yolo_ms = (time.perf_counter() - started_at) * 1000.0
 
     first = results[0]
@@ -170,7 +183,7 @@ def color_for_track(track_id: int | None) -> tuple[int, int, int]:
 def draw_boxes(
     frame_bgr: np.ndarray,
     boxes: list[dict[str, Any]],
-    trajectories: dict[int, list[tuple[int, int]]] | None = None,
+    trajectories: dict[int, list[tuple[int, int] | None]] | None = None,
 ) -> float:
     started_at = time.perf_counter()
     image_h, image_w = frame_bgr.shape[:2]
@@ -180,10 +193,18 @@ def draw_boxes(
 
     if trajectories:
         for track_id, points in trajectories.items():
-            if len(points) < 2:
-                continue
-            polyline = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
-            cv2.polylines(frame_bgr, [polyline], False, color_for_track(track_id), box_thickness, cv2.LINE_AA)
+            segment: list[tuple[int, int]] = []
+            for point in points:
+                if point is None:
+                    if len(segment) >= 2:
+                        polyline = np.array(segment, dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame_bgr, [polyline], False, color_for_track(track_id), box_thickness, cv2.LINE_AA)
+                    segment = []
+                    continue
+                segment.append(point)
+            if len(segment) >= 2:
+                polyline = np.array(segment, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(frame_bgr, [polyline], False, color_for_track(track_id), box_thickness, cv2.LINE_AA)
 
     for box in boxes:
         x1 = int(box["x1"])
@@ -300,6 +321,7 @@ class CsvMetricWriter:
 
 
 def build_video_tracker(args: Any) -> Any:
+    from app.core.config import settings
     from app.services.tracker import VideoTracker
 
     return VideoTracker(
@@ -308,12 +330,17 @@ def build_video_tracker(args: Any) -> Any:
         max_age_override=int(args.max_age),
         max_time_since_update_override=int(args.max_age),
         max_cosine_distance_override=float(args.max_cosine_distance),
+        max_iou_distance_override=float(getattr(args, "max_iou_distance", settings.TRACKER_MAX_IOU_DISTANCE)),
         nn_budget_override=int(args.nn_budget),
         device_override=str(args.device),
+        smoothing_enabled_override=bool(getattr(args, "smoothing_enabled", settings.SMOOTHING_ENABLED)),
+        smoothing_alpha_override=float(getattr(args, "smooth_alpha", settings.SMOOTHING_ALPHA)),
+        smoothing_max_center_jump_override=float(getattr(args, "max_center_jump", settings.SMOOTHING_MAX_CENTER_JUMP)),
+        debug=bool(getattr(args, "debug", False)),
     )
 
 
-def iter_existing_trajectories(tracker: Any) -> dict[int, list[tuple[int, int]]]:
+def iter_existing_trajectories(tracker: Any) -> dict[int, list[tuple[int, int] | None]]:
     raw = tracker.get_trajectories(active_within_frames=getattr(tracker, "max_time_since_update", None))
     return {int(track_id): points for track_id, points in raw.items()}
 
