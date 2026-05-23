@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any
 
+import cv2
 import numpy as np
 
 from app.core.config import settings
@@ -121,6 +122,35 @@ def _center_distance_ratio(box_a: tuple[float, float, float, float], box_b: tupl
     bx, by = _box_center(box_b)
     distance = math.hypot(ax - bx, ay - by)
     return float(distance / max(_box_scale(box_a), _box_scale(box_b), 1.0))
+
+
+def _hist_intersection(hist_a: np.ndarray, hist_b: np.ndarray) -> float:
+    if hist_a.size == 0 or hist_b.size == 0 or hist_a.shape != hist_b.shape:
+        return 0.0
+    return float(np.minimum(hist_a, hist_b).sum())
+
+
+def _clamp_box_to_frame(
+    box: tuple[float, float, float, float],
+    frame_bgr: np.ndarray,
+) -> tuple[int, int, int, int] | None:
+    height, width = frame_bgr.shape[:2]
+    x1 = max(0, min(width - 1, int(round(box[0]))))
+    y1 = max(0, min(height - 1, int(round(box[1]))))
+    x2 = max(0, min(width, int(round(box[2]))))
+    y2 = max(0, min(height, int(round(box[3]))))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+    return x1, y1, x2, y2
+
+
+@dataclass
+class _AppearanceFeature:
+    cls_id: int
+    frame_index: int
+    box: tuple[float, float, float, float]
+    color_hist: np.ndarray
+    texture_hist: np.ndarray
 
 
 @dataclass
@@ -283,6 +313,8 @@ class VideoTracker:
         self._track_stats: dict[int, _TrackStat] = {}
         self._trajectories: dict[int, list[tuple[int, int] | None]] = defaultdict(list)
         self._smoothed_bboxes: dict[int, tuple[float, float, float, float]] = {}
+        self._track_appearance: dict[int, _AppearanceFeature] = {}
+        self._track_aliases: dict[int, int] = {}
         self._deepsort_no_reuse_frames = 0
         self._latest_frame_index = -1
 
@@ -376,6 +408,158 @@ class VideoTracker:
             self._track_stats.pop(track_id, None)
             self._trajectories.pop(track_id, None)
             self._smoothed_bboxes.pop(track_id, None)
+            self._track_appearance.pop(track_id, None)
+            for internal_id, display_id in list(self._track_aliases.items()):
+                if internal_id == track_id or display_id == track_id:
+                    self._track_aliases.pop(internal_id, None)
+
+    def _extract_appearance_feature(
+        self,
+        frame_bgr: np.ndarray,
+        box: tuple[float, float, float, float],
+        cls_id: int,
+        frame_index: int,
+    ) -> _AppearanceFeature | None:
+        if not settings.TRACKER_APPEARANCE_MATCH_ENABLED:
+            return None
+
+        clipped = _clamp_box_to_frame(box, frame_bgr)
+        if clipped is None:
+            return None
+        x1, y1, x2, y2 = clipped
+
+        width = x2 - x1
+        height = y2 - y1
+        pad_x = int(width * 0.08)
+        pad_y = int(height * 0.08)
+        ix1 = min(x2 - 1, x1 + pad_x)
+        iy1 = min(y2 - 1, y1 + pad_y)
+        ix2 = max(ix1 + 1, x2 - pad_x)
+        iy2 = max(iy1 + 1, y2 - pad_y)
+
+        crop = frame_bgr[iy1:iy2, ix1:ix2]
+        if crop.size == 0:
+            return None
+
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        color_hist = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256]).astype(np.float32)
+        color_hist = color_hist.flatten()
+        color_sum = float(color_hist.sum())
+        if color_sum <= 0:
+            return None
+        color_hist /= color_sum
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (48, 48), interpolation=cv2.INTER_AREA)
+        center = gray[1:-1, 1:-1]
+        lbp = np.zeros_like(center, dtype=np.uint8)
+        lbp |= ((gray[:-2, :-2] >= center).astype(np.uint8) << 7)
+        lbp |= ((gray[:-2, 1:-1] >= center).astype(np.uint8) << 6)
+        lbp |= ((gray[:-2, 2:] >= center).astype(np.uint8) << 5)
+        lbp |= ((gray[1:-1, 2:] >= center).astype(np.uint8) << 4)
+        lbp |= ((gray[2:, 2:] >= center).astype(np.uint8) << 3)
+        lbp |= ((gray[2:, 1:-1] >= center).astype(np.uint8) << 2)
+        lbp |= ((gray[2:, :-2] >= center).astype(np.uint8) << 1)
+        lbp |= (gray[1:-1, :-2] >= center).astype(np.uint8)
+        texture_hist, _ = np.histogram(lbp, bins=32, range=(0, 256))
+        texture_hist = texture_hist.astype(np.float32)
+        texture_sum = float(texture_hist.sum())
+        if texture_sum > 0:
+            texture_hist /= texture_sum
+
+        return _AppearanceFeature(
+            cls_id=int(cls_id),
+            frame_index=int(frame_index),
+            box=box,
+            color_hist=color_hist,
+            texture_hist=texture_hist,
+        )
+
+    def _update_appearance_feature(
+        self,
+        track_id: int,
+        frame_bgr: np.ndarray,
+        box: tuple[float, float, float, float],
+        cls_id: int,
+        frame_index: int,
+    ) -> None:
+        feature = self._extract_appearance_feature(frame_bgr, box, cls_id, frame_index)
+        if feature is None:
+            return
+        previous = self._track_appearance.get(track_id)
+        if previous is None:
+            self._track_appearance[track_id] = feature
+            return
+
+        alpha = 0.7
+        feature.color_hist = (alpha * previous.color_hist) + ((1.0 - alpha) * feature.color_hist)
+        feature.texture_hist = (alpha * previous.texture_hist) + ((1.0 - alpha) * feature.texture_hist)
+        feature.color_hist /= max(float(feature.color_hist.sum()), 1e-6)
+        feature.texture_hist /= max(float(feature.texture_hist.sum()), 1e-6)
+        self._track_appearance[track_id] = feature
+
+    def _appearance_score(
+        self,
+        track_id: int,
+        feature: _AppearanceFeature,
+        frame_index: int,
+    ) -> tuple[float, float, float, float] | None:
+        previous = self._track_appearance.get(track_id)
+        stat = self._track_stats.get(track_id)
+        if previous is None or stat is None:
+            return None
+        if previous.cls_id >= 0 and feature.cls_id >= 0 and previous.cls_id != feature.cls_id:
+            return None
+
+        age = frame_index - stat.last_frame
+        max_age = max(0, int(settings.TRACKER_APPEARANCE_MAX_AGE))
+        if age < 0 or age > max_age:
+            return None
+
+        dist_ratio = _center_distance_ratio(feature.box, previous.box)
+        if dist_ratio > settings.TRACKER_APPEARANCE_MAX_CENTER_DISTANCE_RATIO:
+            return None
+
+        color_sim = _hist_intersection(previous.color_hist, feature.color_hist)
+        texture_sim = _hist_intersection(previous.texture_hist, feature.texture_hist)
+        if color_sim < settings.TRACKER_APPEARANCE_MIN_COLOR_SIM:
+            return None
+        if texture_sim < settings.TRACKER_APPEARANCE_MIN_TEXTURE_SIM:
+            return None
+
+        position_sim = max(0.0, 1.0 - (dist_ratio / max(settings.TRACKER_APPEARANCE_MAX_CENTER_DISTANCE_RATIO, 1e-6)))
+        score = (
+            (settings.TRACKER_APPEARANCE_COLOR_WEIGHT * color_sim)
+            + (settings.TRACKER_APPEARANCE_TEXTURE_WEIGHT * texture_sim)
+            + (settings.TRACKER_APPEARANCE_POSITION_WEIGHT * position_sim)
+        )
+        return float(score), float(color_sim), float(texture_sim), float(dist_ratio)
+
+    def _match_by_appearance(
+        self,
+        feature: _AppearanceFeature | None,
+        frame_index: int,
+        assigned_tracks: set[int],
+        *,
+        excluded_track_ids: set[int] | None = None,
+    ) -> tuple[int, float, float, float, float] | None:
+        if feature is None or not settings.TRACKER_APPEARANCE_MATCH_ENABLED:
+            return None
+
+        excluded = excluded_track_ids or set()
+        best: tuple[int, float, float, float, float] | None = None
+        for track_id in list(self._track_appearance.keys()):
+            if track_id in assigned_tracks or track_id in excluded:
+                continue
+            result = self._appearance_score(track_id, feature, frame_index)
+            if result is None:
+                continue
+            score, color_sim, texture_sim, dist_ratio = result
+            if score < settings.TRACKER_APPEARANCE_MIN_SCORE:
+                continue
+            if best is None or score > best[1]:
+                best = (track_id, score, color_sim, texture_sim, dist_ratio)
+        return best
 
     def _update_track_state(
         self,
@@ -459,8 +643,12 @@ class VideoTracker:
             prepared.append(([x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)], float(det["conf"]), str(det["cls_name"])))
 
         previous_track_ids = set(self._track_stats.keys())
-        tracks = self._deep_sort.update_tracks(prepared, frame=frame_bgr)
+        tracks = sorted(
+            self._deep_sort.update_tracks(prepared, frame=frame_bgr),
+            key=lambda item: int(getattr(item, "time_since_update", 0)),
+        )
         tracked_boxes: list[dict[str, Any]] = []
+        assigned_track_ids: set[int] = set()
         reused_track_hits = 0
 
         for track in tracks:
@@ -476,12 +664,56 @@ class VideoTracker:
                 continue
 
             ltrb = track.to_ltrb()
-            track_id = int(track.track_id)
+            internal_track_id = int(track.track_id)
+            track_id = self._track_aliases.get(internal_track_id, internal_track_id)
             time_since_update = int(getattr(track, "time_since_update", 0))
             track_box = (float(ltrb[0]), float(ltrb[1]), float(ltrb[2]), float(ltrb[3]))
+            matched = self._match_detection(track_box, detections)
+            matched_box: tuple[float, float, float, float] | None = None
+            matched_feature: _AppearanceFeature | None = None
+            if matched is not None:
+                matched_box = (
+                    float(matched["x1"]),
+                    float(matched["y1"]),
+                    float(matched["x2"]),
+                    float(matched["y2"]),
+                )
+                matched_feature = self._extract_appearance_feature(
+                    frame_bgr,
+                    matched_box,
+                    int(matched.get("cls_id", -1)),
+                    frame_index,
+                )
+
+            if (
+                matched_feature is not None
+                and internal_track_id not in self._track_aliases
+                and track_id not in previous_track_ids
+            ):
+                appearance_match = self._match_by_appearance(
+                    matched_feature,
+                    frame_index,
+                    assigned_track_ids,
+                    excluded_track_ids={internal_track_id},
+                )
+                if appearance_match is not None:
+                    old_track_id, score, color_sim, texture_sim, dist_ratio = appearance_match
+                    track_id = old_track_id
+                    self._track_aliases[internal_track_id] = old_track_id
+                    if self.debug:
+                        print(
+                            "[Appearance] reid matched: "
+                            f"new_track_id={internal_track_id}, track_id={old_track_id}, "
+                            f"score={score:.3f}, color={color_sim:.3f}, "
+                            f"texture={texture_sim:.3f}, dist_ratio={dist_ratio:.3f}",
+                            flush=True,
+                        )
+
+            if track_id in assigned_track_ids:
+                continue
+            assigned_track_ids.add(track_id)
             if track_id in previous_track_ids:
                 reused_track_hits += 1
-            matched = self._match_detection(track_box, detections)
 
             if matched is not None:
                 self._track_meta[track_id] = {
@@ -516,6 +748,8 @@ class VideoTracker:
                 smoothed_track_box,
                 time_since_update=time_since_update,
             )
+            if matched_box is not None:
+                self._update_appearance_feature(track_id, frame_bgr, matched_box, cls_id, frame_index)
 
         if detections and tracked_boxes:
             if reused_track_hits == 0:
@@ -538,6 +772,7 @@ class VideoTracker:
     def _update_with_naive(
         self,
         detections: list[dict[str, Any]],
+        frame_bgr: np.ndarray,
         frame_index: int,
     ) -> list[dict[str, Any]]:
         for track in self._naive_tracks.values():
@@ -548,11 +783,12 @@ class VideoTracker:
 
         for det in detections:
             det_box = (float(det["x1"]), float(det["y1"]), float(det["x2"]), float(det["y2"]))
+            det_cls_id = int(det.get("cls_id", -1))
+            det_feature = self._extract_appearance_feature(frame_bgr, det_box, det_cls_id, frame_index)
             best_track_id: int | None = None
             best_iou = 0.0
             best_dist_ratio = float("inf")
             best_score = float("-inf")
-            det_cls_id = int(det.get("cls_id", -1))
 
             for track_id, state in self._naive_tracks.items():
                 if track_id in assigned_tracks:
@@ -582,8 +818,21 @@ class VideoTracker:
             )
 
             if not matches_existing_track:
-                best_track_id = self._next_track_id
-                self._next_track_id += 1
+                appearance_match = self._match_by_appearance(det_feature, frame_index, assigned_tracks)
+                if appearance_match is not None:
+                    best_track_id, score, color_sim, texture_sim, dist_ratio = appearance_match
+                    matches_existing_track = True
+                    if self.debug:
+                        print(
+                            "[Appearance] fallback matched: "
+                            f"track_id={best_track_id}, score={score:.3f}, "
+                            f"color={color_sim:.3f}, texture={texture_sim:.3f}, "
+                            f"dist_ratio={dist_ratio:.3f}",
+                            flush=True,
+                        )
+                else:
+                    best_track_id = self._next_track_id
+                    self._next_track_id += 1
 
             self._naive_tracks[best_track_id] = {
                 "box": det_box,
@@ -609,6 +858,7 @@ class VideoTracker:
                 smoothed_track_box,
                 time_since_update=0,
             )
+            self._update_appearance_feature(best_track_id, frame_bgr, det_box, det_cls_id, frame_index)
 
         stale_ids = [
             track_id
@@ -634,13 +884,13 @@ class VideoTracker:
                 self._prune_expired_tracks(frame_index)
                 return tracked_boxes
             except _DeepSortAssociationFailure:
-                tracked_boxes = self._update_with_naive(detections, frame_index)
+                tracked_boxes = self._update_with_naive(detections, frame_bgr, frame_index)
                 self._prune_expired_tracks(frame_index)
                 return tracked_boxes
             except Exception as exc:
                 logger.exception("DeepSort tracking failed")
                 self._disable_deepsort(exc)
-        tracked_boxes = self._update_with_naive(detections, frame_index)
+        tracked_boxes = self._update_with_naive(detections, frame_bgr, frame_index)
         self._prune_expired_tracks(frame_index)
         return tracked_boxes
 
@@ -875,6 +1125,8 @@ class CameraTrackerManager:
                     "smoothing_enabled": session.tracker.smoothing_enabled,
                     "smoothing_alpha": session.tracker.smoothing_alpha,
                     "max_center_jump": session.tracker.smoothing_max_center_jump,
+                    "appearance_match_enabled": settings.TRACKER_APPEARANCE_MATCH_ENABLED,
+                    "appearance_min_score": settings.TRACKER_APPEARANCE_MIN_SCORE,
                 },
             }
 

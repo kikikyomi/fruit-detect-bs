@@ -100,6 +100,20 @@ class Settings:
         self.TRACKER_FALLBACK_CENTER_DISTANCE_WEIGHT = float(
             os.getenv("TRACKER_FALLBACK_CENTER_DISTANCE_WEIGHT", "0.35")
         )
+        self.TRACKER_APPEARANCE_MATCH_ENABLED = _parse_bool_env(
+            os.getenv("TRACKER_APPEARANCE_MATCH_ENABLED"),
+            default=True,
+        )
+        self.TRACKER_APPEARANCE_MIN_SCORE = float(os.getenv("TRACKER_APPEARANCE_MIN_SCORE", "0.58"))
+        self.TRACKER_APPEARANCE_MIN_COLOR_SIM = float(os.getenv("TRACKER_APPEARANCE_MIN_COLOR_SIM", "0.45"))
+        self.TRACKER_APPEARANCE_MIN_TEXTURE_SIM = float(os.getenv("TRACKER_APPEARANCE_MIN_TEXTURE_SIM", "0.15"))
+        self.TRACKER_APPEARANCE_MAX_AGE = int(os.getenv("TRACKER_APPEARANCE_MAX_AGE", "120"))
+        self.TRACKER_APPEARANCE_MAX_CENTER_DISTANCE_RATIO = float(
+            os.getenv("TRACKER_APPEARANCE_MAX_CENTER_DISTANCE_RATIO", "2.5")
+        )
+        self.TRACKER_APPEARANCE_COLOR_WEIGHT = float(os.getenv("TRACKER_APPEARANCE_COLOR_WEIGHT", "0.55"))
+        self.TRACKER_APPEARANCE_TEXTURE_WEIGHT = float(os.getenv("TRACKER_APPEARANCE_TEXTURE_WEIGHT", "0.30"))
+        self.TRACKER_APPEARANCE_POSITION_WEIGHT = float(os.getenv("TRACKER_APPEARANCE_POSITION_WEIGHT", "0.15"))
         self.CAMERA_TRACKER_SESSION_TTL_SEC = int(os.getenv("CAMERA_TRACKER_SESSION_TTL_SEC", "120"))
         self.CAMERA_IMGSZ = int(os.getenv("CAMERA_IMGSZ", "480"))
         self.CAMERA_CONF_THRES = float(os.getenv("CAMERA_CONF_THRES", "0.15"))

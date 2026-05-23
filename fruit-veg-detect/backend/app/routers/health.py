@@ -77,6 +77,17 @@ def health() -> dict[str, object]:
             "apply_to_display_only": settings.SMOOTHING_APPLY_TO_DISPLAY_ONLY,
             "max_center_jump": settings.SMOOTHING_MAX_CENTER_JUMP,
         },
+        "appearance_match_defaults": {
+            "enabled": settings.TRACKER_APPEARANCE_MATCH_ENABLED,
+            "min_score": settings.TRACKER_APPEARANCE_MIN_SCORE,
+            "min_color_sim": settings.TRACKER_APPEARANCE_MIN_COLOR_SIM,
+            "min_texture_sim": settings.TRACKER_APPEARANCE_MIN_TEXTURE_SIM,
+            "max_age": settings.TRACKER_APPEARANCE_MAX_AGE,
+            "max_center_distance_ratio": settings.TRACKER_APPEARANCE_MAX_CENTER_DISTANCE_RATIO,
+            "color_weight": settings.TRACKER_APPEARANCE_COLOR_WEIGHT,
+            "texture_weight": settings.TRACKER_APPEARANCE_TEXTURE_WEIGHT,
+            "position_weight": settings.TRACKER_APPEARANCE_POSITION_WEIGHT,
+        },
         "deepsort_available": deepsort["available"],
         "deepsort_error": deepsort["import_error"],
     }
